@@ -615,6 +615,13 @@ export function TuiApp({ state, onInput, onPermissionResolve, onExit, spotifyCli
       return;
     }
 
+    // Ctrl+D → show last task's step log (when not in workspace nav mode,
+    // which uses Ctrl+D for scrolling).  Splash mode also uses 'd' key.
+    if (key.ctrl && (ch === 'd' || ch === 'D') && !state.permissionPrompt && state.mode !== 'workspace') {
+      onInput('/log');
+      return;
+    }
+
     // Ctrl+N → insert newline (multi-line input)
     if (key.ctrl && (ch === 'n' || ch === 'N' || ch === '\x0e')) {
       setInput((prev) => prev.slice(0, cursorPos) + '\n' + prev.slice(cursorPos));
@@ -1670,32 +1677,39 @@ function RunningStepRow({ step }: { step: ToolStep }) {
 }
 
 function ToolStepsView({ steps, viewMode, idle }: { steps: ToolStep[]; viewMode: 'balanced' | 'detailed'; idle?: boolean }) {
-  // When idle (task complete), collapse to a single summary line to free
-  // up screen space. Full history remains available via /progress.
+  // When idle (task complete), show a single compact summary line.
+  // Full history is accessible via Ctrl+D (/log).
   if (idle) {
     const last = [...steps].reverse().find((s) => s.status === 'done' || s.status === 'error') ?? steps[steps.length - 1];
     if (!last) return null;
     const totalDone = steps.filter((s) => s.status === 'done').length;
-    const icon = last.status === 'done' ? '✅' : last.status === 'error' ? '❌' : '·';
-    const more = totalDone > 1 ? ` · +${totalDone - 1} earlier` : '';
+    const icon = last.status === 'done' ? '✓' : last.status === 'error' ? '✗' : '·';
+    const more = totalDone > 1 ? ` (+${totalDone - 1})` : '';
     return (
       <Box marginLeft={2} marginTop={1}>
-        <Text dimColor>{icon} {last.label}{last.elapsed != null ? ` (${last.elapsed.toFixed(1)}s)` : ''}{more} · /progress</Text>
+        <Text dimColor>{icon} {last.label}{more} · Ctrl+D for details</Text>
       </Box>
     );
   }
 
-
-  const visible = viewMode === 'detailed' ? steps.slice(-20) : steps.slice(-5);
+  // Active: show at most 3 visible steps (running + last 2 done).
+  // All other steps are collapsed into "N earlier" — no scrolling list.
+  const MAX_VISIBLE = 3;
   const totalDone = steps.filter((s) => s.status === 'done').length;
-  const totalRunning = steps.filter((s) => s.status === 'running').length;
-  const hiddenCount = Math.max(0, steps.length - visible.length);
+  const doneSteps = steps.filter((s) => s.status === 'done');
+  const runningSteps = steps.filter((s) => s.status === 'running');
+  const hiddenCount = Math.max(0, steps.length - MAX_VISIBLE);
+  const visible = [
+    ...doneSteps.slice(-(MAX_VISIBLE - runningSteps.length)),
+    ...runningSteps,
+  ].slice(-MAX_VISIBLE);
+
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={1}>
       <Box>
-        <Text color="gray">Activity</Text>
-        <Text dimColor> · {totalDone} done{totalRunning > 0 ? `, ${totalRunning} running` : ''}</Text>
-        {hiddenCount > 0 && <Text dimColor> · {hiddenCount} earlier steps hidden</Text>}
+        <Text color="gray" bold>⏳</Text>
+        <Text color="gray"> {totalDone} done{runningSteps.length > 0 ? `, ${runningSteps.length} running` : ''}</Text>
+        {hiddenCount > 0 && <Text dimColor> · {hiddenCount} earlier</Text>}
       </Box>
       {visible.map((step) => {
         if (step.status === 'running') {
@@ -1703,15 +1717,12 @@ function ToolStepsView({ steps, viewMode, idle }: { steps: ToolStep[]; viewMode:
         }
         return (
           <Box key={step.id}>
-            <Text>{step.status === 'done' ? '✅' : '❌'}</Text>
-            <Text> </Text>
-            <Text dimColor={step.status === 'done'}>{step.label}</Text>
-            {step.status === 'done' && step.elapsed != null && <Text dimColor> ({step.elapsed.toFixed(1)}s)</Text>}
-            {viewMode === 'detailed' && step.result && <Text dimColor> · {step.result}</Text>}
+            <Text color="green">✓</Text>
+            <Text dimColor> {step.label}</Text>
+            {step.elapsed != null && <Text dimColor> ({step.elapsed.toFixed(1)}s)</Text>}
           </Box>
         );
       })}
-      <Text dimColor>Ctrl+T toggles view · /progress for full history</Text>
     </Box>
   );
 }
@@ -1736,22 +1747,21 @@ function ThinkingIndicator({ agentName, steps, mode }: { agentName: string; step
   const doneSteps = steps.filter((s) => s.status === 'done');
   const totalSteps = steps.length;
 
-  // Determine current action label
   const currentAction = runningStep
     ? runningStep.label
     : (mode === 'coding' || mode === 'workspace') ? 'Analyzing code' : 'Composing response';
 
-  // Prefer per-step elapsed (more meaningful — "this tool has been running Ns")
-  // when a step is active; fall back to thinking-session elapsed otherwise.
   const displayElapsed = runningStep?.startedAt
-    ? Math.floor((Date.now() - runningStep.startedAt) / 1000) + (frame * 0) // depend on frame so it re-renders
+    ? Math.floor((Date.now() - runningStep.startedAt) / 1000) + (frame * 0)
     : elapsed;
   const actionTone = displayElapsed >= 90 ? 'red' : displayElapsed >= 30 ? 'yellow' : 'white';
 
-  // Format elapsed time
   const mins = Math.floor(displayElapsed / 60);
   const secs = displayElapsed % 60;
   const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  // Show at most 2 most recent completed steps (keeps total lines ≤ 3)
+  const recentDone = doneSteps.slice(-2);
 
   return (
     <Box marginTop={1} marginLeft={2} flexDirection="column">
@@ -1765,9 +1775,9 @@ function ThinkingIndicator({ agentName, steps, mode }: { agentName: string; step
         <Text color={actionTone} bold>{currentAction}</Text>
         {displayElapsed >= 90 && <Text color="red" dimColor> · long op (Ctrl+C cancels)</Text>}
       </Box>
-      {doneSteps.length > 0 && (
+      {recentDone.length > 0 && (
         <Box flexDirection="column" marginLeft={4} marginTop={0}>
-          {doneSteps.slice(-3).map((step) => (
+          {recentDone.map((step) => (
             <Box key={step.id}>
               <Text color="green">✓</Text>
               <Text dimColor> {step.label}</Text>

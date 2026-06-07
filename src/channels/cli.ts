@@ -31,6 +31,10 @@ export interface TuiState {
   backgroundTasks: BackgroundTaskInfo[];
   web: { enabled: boolean; port: number } | null;
   saverInfo: SaverInfo | null;
+  /** Last completed step log, preserved after completion wipes toolSteps. Ctrl+D dumps this. */
+  lastStepLog: ToolStep[] | null;
+  /** Elapsed ms for the last completed task. */
+  lastStepLogElapsed: number | null;
 }
 
 const defaultState: TuiState = {
@@ -54,6 +58,8 @@ const defaultState: TuiState = {
   backgroundTasks: [],
   web: null,
   saverInfo: null,
+  lastStepLog: null,
+  lastStepLogElapsed: null,
 };
 
 function shallowEqualSubAgents(a: SubAgentInfo[], b: SubAgentInfo[]): boolean {
@@ -278,6 +284,38 @@ export class CLIChannel extends BaseChannel {
         this.update({ viewMode: this.state.viewMode === 'balanced' ? 'detailed' : 'balanced' });
         return;
       }
+      // Show last task's full step log (triggered by Ctrl+D or /log)
+      if (trimmed === '/log') {
+        const steps = this.state.toolSteps.length > 0 ? this.state.toolSteps : (this.state.lastStepLog ?? []);
+        if (steps.length > 0) {
+          const elapsed = this.state.lastStepLogElapsed;
+          const suffix = this.state.toolSteps.length > 0 ? ' (active)' : '';
+          const elapsedSec = elapsed != null ? ` · ${Math.round(elapsed / 1000)}s` : '';
+          const lines = steps.map((s) => {
+            const icon = s.status === 'done' ? '✓' : s.status === 'error' ? '✗' : '→';
+            const time = s.elapsed != null ? ` (${s.elapsed.toFixed(1)}s)` : '';
+            const result = s.result ? ` · ${s.result}` : '';
+            return `${icon} ${s.label}${time}${result}`;
+          });
+          const header = `── Step log (${steps.filter((s) => s.status === 'done').length}/${steps.length} done${elapsedSec}${suffix}) ──`;
+          const msg: ChatMessage = {
+            id: `log-${Date.now().toString(36)}`,
+            role: 'system',
+            content: `${header}\n${lines.join('\n')}`,
+            timestamp: Date.now(),
+          };
+          this.update({ chatMessages: [...this.state.chatMessages, msg] });
+        } else {
+          const msg: ChatMessage = {
+            id: `log-${Date.now().toString(36)}`,
+            role: 'system',
+            content: 'No step history available yet. Run a task first, then press Ctrl+D.',
+            timestamp: Date.now(),
+          };
+          this.update({ chatMessages: [...this.state.chatMessages, msg] });
+        }
+        return;
+      }
       // Clear stale tool steps from the previous task so the activity
       // panel starts fresh for each new user message.
       if (this.state.toolSteps.length > 0) {
@@ -345,6 +383,8 @@ export class CLIChannel extends BaseChannel {
       chatMessages: [...this.state.chatMessages, msg],
       isThinking: false,
       toolSteps: [],
+      lastStepLog: this.state.toolSteps.length > 0 ? [...this.state.toolSteps] : (this.state.lastStepLog ?? null),
+      lastStepLogElapsed: elapsedMs,
     });
   }
 
@@ -386,6 +426,7 @@ export class CLIChannel extends BaseChannel {
     };
     this.stepCount += 1;
     this.stepStartTime = Date.now();
+    logger.debug({ tool: toolName, args }, 'voice.tui step start');
     this.update({
       toolSteps: [...this.state.toolSteps, step],
       isThinking: true,
@@ -393,14 +434,15 @@ export class CLIChannel extends BaseChannel {
   }
 
   sendStepDone(toolName: string, result: unknown): void {
+    const summary = formatToolResult(toolName, result);
     const toolSteps = this.state.toolSteps.map((step) => {
       if (step.status === 'running') {
         const elapsed = this.stepStartTime ? (Date.now() - this.stepStartTime) / 1000 : 0;
-        const summary = formatToolResult(toolName, result);
         return { ...step, status: 'done' as const, elapsed, result: summary || undefined };
       }
       return step;
     });
+    logger.debug({ tool: toolName, summary }, 'voice.tui step done');
     this.update({ toolSteps });
   }
 

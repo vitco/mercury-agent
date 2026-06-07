@@ -209,7 +209,7 @@ export function getDefaultConfig(): MercuryConfig {
       ollamaLocal: {
         name: 'ollamaLocal',
         apiKey: '',
-        baseUrl: getEnv('OLLAMA_LOCAL_BASE_URL', 'http://127.0.0.1:11434/api'),
+        baseUrl: getEnv('OLLAMA_LOCAL_BASE_URL', 'http://127.0.0.1:11434/v1'),
         model: getEnv('OLLAMA_LOCAL_MODEL', ''),
         enabled: getEnvBool('OLLAMA_LOCAL_ENABLED', false),
       },
@@ -315,8 +315,10 @@ export function loadConfig(): MercuryConfig {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     const fileConfig = parseYaml(raw) as Partial<MercuryConfig>;
     const defaults = getDefaultConfig();
-    return migrateLegacyOllamaCloudBaseUrl(
-      migrateLegacyTelegramAccess(deepMerge(defaults, fileConfig)),
+    return migrateLegacyOllamaLocalBaseUrl(
+      migrateLegacyOllamaCloudBaseUrl(
+        migrateLegacyTelegramAccess(deepMerge(defaults, fileConfig)),
+      ),
     );
   }
   return migrateLegacyTelegramAccess(getDefaultConfig());
@@ -600,6 +602,21 @@ export function migrateLegacyTelegramAccess(config: MercuryConfig): MercuryConfi
 export function migrateLegacyOllamaCloudBaseUrl(config: MercuryConfig): MercuryConfig {
   if (config.providers.ollamaCloud.baseUrl === 'https://ollama.com/api') {
     config.providers.ollamaCloud.baseUrl = 'https://ollama.com/v1';
+    saveConfig(config);
+  }
+  return config;
+}
+
+/**
+ * Migrate local Ollama base URL from the legacy /api endpoint to /v1.
+ * Ollama has supported /v1 (OpenAI-compatible) since v0.1.14, and the
+ * /api endpoint is incompatible with AI SDK v6+ when used through
+ * ollama-ai-provider (which declares spec version v1).
+ */
+export function migrateLegacyOllamaLocalBaseUrl(config: MercuryConfig): MercuryConfig {
+  const local = config.providers.ollamaLocal.baseUrl;
+  if (local === 'http://127.0.0.1:11434/api' || local === 'http://localhost:11434/api') {
+    config.providers.ollamaLocal.baseUrl = local.replace('/api', '/v1');
     saveConfig(config);
   }
   return config;
